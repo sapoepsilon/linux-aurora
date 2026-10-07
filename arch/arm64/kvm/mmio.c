@@ -151,6 +151,81 @@ int kvm_handle_mmio_return(struct kvm_vcpu *vcpu)
 	return 1;
 }
 
+static bool emulate_nisv_ldst = true;
+module_param(emulate_nisv_ldst, bool, 0644);
+MODULE_PARM_DESC(emulate_nisv_ldst,
+		 "Decode and emulate MMIO load/store-immediate aborts that lack a valid syndrome");
+
+/*
+ * Some guests (macOS on the VMApple platform) access MMIO with writeback
+ * forms such as "str w9, [x8, #128]!", for which the CPU reports no
+ * instruction syndrome. Decode the single-register load/store (immediate)
+ * class from guest memory, apply the base writeback, and synthesise a valid
+ * ISS so the regular MMIO path (in-kernel devices or userspace) handles the
+ * access. Anything else keeps the previous behaviour.
+ */
+static bool kvm_emulate_nisv_ldst(struct kvm_vcpu *vcpu)
+{
+	struct kvm_vcpu_fault_info *fault = &vcpu->arch.fault;
+	u64 par = fault->insn_par, ipa, base, addr, iss;
+	unsigned int size, opc, rt, rn, idx;
+	bool store, sign, sf, wb = false;
+	s64 off;
+	__le32 raw;
+	u32 insn;
+
+	if (!emulate_nisv_ldst || (par & SYS_PAR_EL1_F) || vcpu_mode_is_32bit(vcpu))
+		return false;
+	ipa = (par & GENMASK_ULL(51, 12)) | (*vcpu_pc(vcpu) & GENMASK_ULL(11, 0));
+	if (kvm_read_guest(vcpu->kvm, ipa, &raw, sizeof(raw)))
+		return false;
+	insn = le32_to_cpu(raw);
+
+	size = insn >> 30;
+	opc = (insn >> 22) & 3;
+	rn = (insn >> 5) & 31;
+	rt = insn & 31;
+	if ((insn & 0x3f000000) == 0x39000000) {
+		/* unsigned immediate offset, no writeback */
+		off = (s64)(((insn >> 10) & 0xfff) << size);
+	} else if ((insn & 0x3f200000) == 0x38000000) {
+		idx = (insn >> 10) & 3;
+		if (idx == 2)		/* unprivileged LDTR/STTR */
+			return false;
+		off = sign_extend64((insn >> 12) & 0x1ff, 8);
+		wb = idx != 0;		/* 1: post-index, 3: pre-index */
+	} else {
+		return false;
+	}
+
+	store = opc == 0;
+	sign = opc >= 2;
+	if (sign && (size == 3 || (size == 2 && opc == 3)))
+		return false;		/* PRFM or unallocated */
+	if (rn == 31 || (wb && !store && rt == rn))
+		return false;
+
+	base = vcpu_get_reg(vcpu, rn);
+	addr = (wb && ((insn >> 10) & 3) == 1) ? base : base + off;
+	if (addr != kvm_vcpu_get_hfar(vcpu))
+		return false;
+
+	sf = size == 3 || (sign && opc == 2);
+	iss = ESR_ELx_ISV | ((u64)size << ESR_ELx_SAS_SHIFT) |
+	      ((u64)rt << ESR_ELx_SRT_SHIFT);
+	if (sign)
+		iss |= ESR_ELx_SSE;
+	if (sf)
+		iss |= ESR_ELx_SF;
+	if (store)
+		iss |= ESR_ELx_WNR;
+	fault->esr_el2 = (fault->esr_el2 & ~(ESR_ELx_ISS_MASK & ~ESR_ELx_FSC)) | iss;
+
+	if (wb)
+		vcpu_set_reg(vcpu, rn, base + off);
+	return true;
+}
+
 int io_mem_abort(struct kvm_vcpu *vcpu, phys_addr_t fault_ipa)
 {
 	struct kvm_run *run = vcpu->run;
@@ -161,6 +236,9 @@ int io_mem_abort(struct kvm_vcpu *vcpu, phys_addr_t fault_ipa)
 	int len;
 	u8 data_buf[8];
 	u64 esr;
+
+	if (!kvm_vcpu_dabt_isvalid(vcpu) && !vcpu_is_protected(vcpu))
+		kvm_emulate_nisv_ldst(vcpu);
 
 	esr = kvm_vcpu_get_esr(vcpu);
 

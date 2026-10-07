@@ -79,12 +79,36 @@ static inline bool __hpfar_valid(u64 esr)
 	return esr_fsc_is_addr_sz_fault(esr);
 }
 
+/*
+ * A data abort without a valid instruction syndrome (e.g. a pre-indexed
+ * store to MMIO) can only be emulated by decoding the instruction. Resolve
+ * the IPA of the faulting PC now, while the guest's EL1 translation regime
+ * is still live; the decode itself happens later in io_mem_abort().
+ */
+static inline void __get_fault_insn_par(u64 esr, struct kvm_vcpu_fault_info *fault)
+{
+	u64 par, tmp;
+
+	fault->insn_par = SYS_PAR_EL1_F;
+	if (ESR_ELx_EC(esr) != ESR_ELx_EC_DABT_LOW || (esr & ESR_ELx_ISV))
+		return;
+
+	par = read_sysreg_par();
+	if (!__kvm_at(OP_AT_S1E1R, read_sysreg_el2(SYS_ELR)))
+		tmp = read_sysreg_par();
+	else
+		tmp = SYS_PAR_EL1_F;
+	write_sysreg(par, par_el1);
+	fault->insn_par = tmp;
+}
+
 static inline bool __get_fault_info(u64 esr, struct kvm_vcpu_fault_info *fault)
 {
 	u64 hpfar;
 
 	fault->far_el2		= read_sysreg_el2(SYS_FAR);
 	fault->hpfar_el2	= 0;
+	__get_fault_insn_par(esr, fault);
 
 	if (__hpfar_valid(esr))
 		hpfar = read_sysreg(hpfar_el2);

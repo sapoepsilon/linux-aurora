@@ -428,6 +428,7 @@ struct kvm_vcpu_fault_info {
 	u64 far_el2;		/* Hyp Fault Address Register */
 	u64 hpfar_el2;		/* Hyp IPA Fault Address Register */
 	u64 disr_el1;		/* Deferred [SError] Status Register */
+	u64 insn_par;		/* PAR_EL1 for the faulting PC (no-ISV data aborts) */
 };
 
 /*
