@@ -412,6 +412,12 @@ struct kvm_arch {
 	struct kvm_sysreg_masks	*sysreg_masks;
 
 	/*
+	 * Apple PAuth VM key (APVMKEYLO/HI_EL2), random per VM, used by all
+	 * vCPUs for the VM's life. Only set if kvm_has_apple_pauth().
+	 */
+	u64 apple_vmkey[2];
+
+	/*
 	 * For an untrusted host VM, 'pkvm.handle' is used to lookup
 	 * the associated pKVM instance in the hypervisor.
 	 */
@@ -487,6 +493,11 @@ enum vcpu_sysreg {
 	APDBKEYHI_EL1,
 	APGAKEYLO_EL1,
 	APGAKEYHI_EL1,
+
+	/* Apple IMPDEF pointer authentication (kvm_has_apple_pauth()) */
+	APPLE_APCTL_EL1,	/* PAuth control */
+	APPLE_KERNKEYLO_EL1,	/* Kernel key, low */
+	APPLE_KERNKEYHI_EL1,	/* Kernel key, high */
 
 	/* Memory Tagging Extension registers */
 	RGSR_EL1,	/* Random Allocation Tag Seed Register */
@@ -1420,6 +1431,18 @@ static inline void kvm_init_host_cpu_context(struct kvm_cpu_context *cpu_ctxt)
 static inline bool kvm_system_needs_idmapped_vectors(void)
 {
 	return cpus_have_final_cap(ARM64_SPECTRE_V3A);
+}
+
+/*
+ * Apple's PAuth state is only handled under VHE on bare metal, where KVM
+ * owns EL2 and reaches the guest's copy through the EL12 encodings. nVHE,
+ * hVHE and protected mode never see it. Set once at init.
+ */
+DECLARE_STATIC_KEY_FALSE(kvm_apple_pauth);
+
+static inline bool kvm_has_apple_pauth(void)
+{
+	return static_branch_unlikely(&kvm_apple_pauth);
 }
 
 void kvm_init_host_debug_data(void);

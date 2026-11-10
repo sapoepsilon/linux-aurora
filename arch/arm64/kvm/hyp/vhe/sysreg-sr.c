@@ -9,6 +9,7 @@
 #include <linux/compiler.h>
 #include <linux/kvm_host.h>
 
+#include <asm/apple_cpufeature.h>
 #include <asm/kprobes.h>
 #include <asm/kvm_asm.h>
 #include <asm/kvm_emulate.h>
@@ -198,6 +199,44 @@ static inline void __mpam_guest_load(void)
 	}
 }
 
+/*
+ * Apple PAuth: the guest's APCTL and kernel key live in the CPU while the
+ * vcpu is loaded, like its other EL1 registers. The VM key and APSTS are
+ * not guest state: they are written on every load, before the guest's
+ * keys, so that a CPU never runs a vcpu under another VM's key. The host
+ * runs at EL2 and doesn't use any of them, so nothing is restored on put.
+ */
+static void __apple_pauth_load(struct kvm_vcpu *vcpu)
+{
+	struct kvm_cpu_context *ctxt = &vcpu->arch.ctxt;
+	const u64 *vmkey = vcpu->kvm->arch.apple_vmkey;
+
+	if (!kvm_has_apple_pauth())
+		return;
+
+	write_sysreg_s(vmkey[0], SYS_IMP_APL_APVMKEYLO_EL2);
+	write_sysreg_s(vmkey[1], SYS_IMP_APL_APVMKEYHI_EL2);
+	write_sysreg_s(APSTS_APPLE_VM_KEY, SYS_IMP_APL_APSTS_EL12);
+	/* Their effect on the key registers isn't documented: order them */
+	isb();
+
+	write_sysreg_s(ctxt_sys_reg(ctxt, APPLE_APCTL_EL1), SYS_IMP_APL_APCTL_EL12);
+	write_sysreg_s(ctxt_sys_reg(ctxt, APPLE_KERNKEYLO_EL1), SYS_IMP_APL_KERNKEYLO_EL12);
+	write_sysreg_s(ctxt_sys_reg(ctxt, APPLE_KERNKEYHI_EL1), SYS_IMP_APL_KERNKEYHI_EL12);
+}
+
+static void __apple_pauth_save(struct kvm_vcpu *vcpu)
+{
+	struct kvm_cpu_context *ctxt = &vcpu->arch.ctxt;
+
+	if (!kvm_has_apple_pauth())
+		return;
+
+	ctxt_sys_reg(ctxt, APPLE_APCTL_EL1) = read_sysreg_s(SYS_IMP_APL_APCTL_EL12);
+	ctxt_sys_reg(ctxt, APPLE_KERNKEYLO_EL1) = read_sysreg_s(SYS_IMP_APL_KERNKEYLO_EL12);
+	ctxt_sys_reg(ctxt, APPLE_KERNKEYHI_EL1) = read_sysreg_s(SYS_IMP_APL_KERNKEYHI_EL12);
+}
+
 /**
  * __vcpu_load_switch_sysregs - Load guest system registers to the physical CPU
  *
@@ -257,6 +296,8 @@ void __vcpu_load_switch_sysregs(struct kvm_vcpu *vcpu)
 		__sysreg_restore_el1_state(guest_ctxt, midr, mpidr);
 	}
 
+	__apple_pauth_load(vcpu);
+
 	vcpu_set_flag(vcpu, SYSREGS_ON_CPU);
 }
 
@@ -282,6 +323,8 @@ void __vcpu_put_switch_sysregs(struct kvm_vcpu *vcpu)
 		__sysreg_save_vel2_state(vcpu);
 	else
 		__sysreg_save_el1_state(guest_ctxt);
+
+	__apple_pauth_save(vcpu);
 
 	__sysreg_save_user_state(guest_ctxt);
 	__sysreg32_save_state(vcpu);

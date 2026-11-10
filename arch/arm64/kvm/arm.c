@@ -21,6 +21,8 @@
 #include <linux/irqbypass.h>
 #include <linux/sched/stat.h>
 #include <linux/psci.h>
+#include <linux/random.h>
+#include <linux/string.h>
 #include <trace/events/kvm.h>
 
 #define CREATE_TRACE_POINTS
@@ -278,6 +280,10 @@ int kvm_arch_init_vm(struct kvm *kvm, unsigned long type)
 
 	bitmap_zero(kvm->arch.vcpu_features, KVM_VCPU_MAX_FEATURES);
 
+	if (kvm_has_apple_pauth())
+		get_random_bytes(kvm->arch.apple_vmkey,
+				 sizeof(kvm->arch.apple_vmkey));
+
 	return 0;
 
 err_uninit_mmu:
@@ -342,6 +348,8 @@ void kvm_arch_destroy_vm(struct kvm *kvm)
 
 	kvm_destroy_nested(kvm);
 	kvm_arm_teardown_hypercalls(kvm);
+
+	memzero_explicit(kvm->arch.apple_vmkey, sizeof(kvm->arch.apple_vmkey));
 }
 
 static bool kvm_has_full_ptr_auth(void)
@@ -3012,6 +3020,24 @@ void kvm_arch_irq_bypass_start(struct irq_bypass_consumer *cons)
 	kvm_arm_resume_guest(irqfd->kvm);
 }
 
+DEFINE_STATIC_KEY_FALSE(kvm_apple_pauth);
+
+static void __init kvm_apple_pauth_init(void)
+{
+	/*
+	 * The capability matches the CPU by MIDR at EL2, which a guest
+	 * hypervisor (nested virt) also sees, but there these registers UNDEF.
+	 * Apple machines have no firmware below EL2, so bare metal has no
+	 * SMCCC conduit, while a hypervisor below us provides one.
+	 */
+	if (!has_vhe() || !cpus_have_final_cap(ARM64_HAS_PAUTH_VIRT_APPLE) ||
+	    arm_smccc_1_1_get_conduit() != SMCCC_CONDUIT_NONE)
+		return;
+
+	static_branch_enable(&kvm_apple_pauth);
+	kvm_info("Apple PAuth virtualization state enabled\n");
+}
+
 /* Initialize Hyp-mode and memory mappings on all CPUs */
 static __init int kvm_arm_init(void)
 {
@@ -3070,6 +3096,8 @@ static __init int kvm_arm_init(void)
 	err = init_subsystems();
 	if (err)
 		goto out_hyp;
+
+	kvm_apple_pauth_init();
 
 	kvm_info("%s%sVHE%s mode initialized successfully\n",
 		 in_hyp_mode ? "" : (is_protected_kvm_enabled() ?

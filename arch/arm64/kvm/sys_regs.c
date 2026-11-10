@@ -19,6 +19,7 @@
 #include <linux/uaccess.h>
 #include <linux/irqchip/arm-gic-v3.h>
 
+#include <asm/apple_cpufeature.h>
 #include <asm/arm_pmuv3.h>
 #include <asm/cacheflush.h>
 #include <asm/cputype.h>
@@ -1528,6 +1529,22 @@ static unsigned int ptrauth_visibility(const struct kvm_vcpu *vcpu,
 #define PTRAUTH_KEY(k)							\
 	__PTRAUTH_KEY(k ## KEYLO_EL1),					\
 	__PTRAUTH_KEY(k ## KEYHI_EL1)
+
+static unsigned int apple_pauth_visibility(const struct kvm_vcpu *vcpu,
+					   const struct sys_reg_desc *rd)
+{
+	return kvm_has_apple_pauth() ? 0 : REG_HIDDEN;
+}
+
+/*
+ * The guest's Apple PAuth state, for userspace: a VMM serves the guest's
+ * key management hypercalls with KVM_SET_ONE_REG on the EL12 encodings.
+ * The guest itself can't access it: if its access traps, it UNDEFs, as
+ * do the EL1 forms, APSTS and the VM key, which have no entry here.
+ */
+#define APPLE_PAUTH_REG(enc, r)						\
+	{ SYS_DESC(SYS_IMP_APL_ ## enc), undef_access, reset_val, r, 0,	\
+	  .visibility = apple_pauth_visibility }
 
 static bool access_arch_timer(struct kvm_vcpu *vcpu,
 			      struct sys_reg_params *p,
@@ -3878,6 +3895,10 @@ static const struct sys_reg_desc sys_reg_descs[] = {
 	{ SYS_DESC(SYS_CNTV_CVAL_EL02), access_arch_timer },
 
 	EL2_REG(SP_EL2, NULL, reset_unknown, 0),
+
+	APPLE_PAUTH_REG(KERNKEYLO_EL12, APPLE_KERNKEYLO_EL1),
+	APPLE_PAUTH_REG(KERNKEYHI_EL12, APPLE_KERNKEYHI_EL1),
+	APPLE_PAUTH_REG(APCTL_EL12, APPLE_APCTL_EL1),
 };
 
 static bool handle_at_s1e01(struct kvm_vcpu *vcpu, struct sys_reg_params *p,

@@ -7,6 +7,7 @@
 
 #include <asm/cpufeature.h>
 #include <asm/apple_cpufeature.h>
+#include <asm/virt.h>
 #include <linux/irqflags.h>
 #include <linux/preempt.h>
 #include <linux/printk.h>
@@ -76,6 +77,35 @@ static bool has_apple_actlr_virt(const struct arm64_cpu_capabilities *entry, int
 	return midr >= MIDR_APPLE_M2_BLIZZARD && midr <= MIDR_CPU_MODEL(ARM_CPU_IMP_APPLE, 0xfff);
 }
 
+/*
+ * The Apple pointer authentication registers that a hypervisor needs to
+ * run guests (APCTL, KERNKEY, APSTS, APVMKEY) are accessible at EL2 on M1
+ * and M2. No ID register advertises them, so match the parts by MIDR.
+ * This is the M1 and M2 part of m1n1's table of CPUs whose Apple system
+ * registers are unlocked; t6002 and t6022 report t6001 and t6021 parts.
+ */
+static const struct midr_range apple_pauth_virt_cpus[] = {
+	MIDR_ALL_VERSIONS(MIDR_APPLE_M1_ICESTORM),
+	MIDR_ALL_VERSIONS(MIDR_APPLE_M1_FIRESTORM),
+	MIDR_ALL_VERSIONS(MIDR_APPLE_M1_ICESTORM_PRO),
+	MIDR_ALL_VERSIONS(MIDR_APPLE_M1_FIRESTORM_PRO),
+	MIDR_ALL_VERSIONS(MIDR_APPLE_M1_ICESTORM_MAX),
+	MIDR_ALL_VERSIONS(MIDR_APPLE_M1_FIRESTORM_MAX),
+	MIDR_ALL_VERSIONS(MIDR_APPLE_M2_BLIZZARD),
+	MIDR_ALL_VERSIONS(MIDR_APPLE_M2_AVALANCHE),
+	MIDR_ALL_VERSIONS(MIDR_APPLE_M2_BLIZZARD_PRO),
+	MIDR_ALL_VERSIONS(MIDR_APPLE_M2_AVALANCHE_PRO),
+	MIDR_ALL_VERSIONS(MIDR_APPLE_M2_BLIZZARD_MAX),
+	MIDR_ALL_VERSIONS(MIDR_APPLE_M2_AVALANCHE_MAX),
+	{},
+};
+
+static bool has_apple_pauth_virt(const struct arm64_cpu_capabilities *entry, int scope)
+{
+	return is_kernel_in_hyp_mode() &&
+	       is_midr_in_range_list(apple_pauth_virt_cpus);
+}
+
 static const struct arm64_cpu_capabilities arm64_impdef_features[] = {
 #ifdef CONFIG_ARM64_MEMORY_MODEL_CONTROL
 	{
@@ -107,6 +137,12 @@ static const struct arm64_cpu_capabilities arm64_impdef_features[] = {
 		.capability = ARM64_HAS_ACTLR_VIRT,
 		.type = ARM64_CPUCAP_EARLY_LOCAL_CPU_FEATURE,
 		.matches = has_apple_actlr_virt,
+	},
+	{
+		.desc = "PAuth virtualization (IMPDEF, Apple)",
+		.capability = ARM64_HAS_PAUTH_VIRT_APPLE,
+		.type = ARM64_CPUCAP_EARLY_LOCAL_CPU_FEATURE,
+		.matches = has_apple_pauth_virt,
 	},
 	{},
 };
