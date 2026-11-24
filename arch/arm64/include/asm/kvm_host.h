@@ -437,6 +437,12 @@ struct kvm_vcpu_fault_info {
 	u64 insn_par;		/* PAR_EL1 for the faulting PC (no-ISV data aborts) */
 };
 
+struct kvm_mmio_wb {
+	u64 val;
+	u8 rn;
+	bool pending;
+};
+
 /*
  * VNCR() just places the VNCR_capable registers in the enum after
  * __VNCR_START__, and the value (after correction) to be an 8-byte offset
@@ -881,6 +887,9 @@ struct kvm_vcpu_arch {
 
 	/* Exception Information */
 	struct kvm_vcpu_fault_info fault;
+
+	/* Pending base-register writeback for emulated NISV MMIO */
+	struct kvm_mmio_wb mmio_wb;
 
 	/* Configuration flags, set once and for all before the vcpu can run */
 	u8 cflags;

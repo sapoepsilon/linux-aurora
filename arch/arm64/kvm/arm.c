@@ -1282,6 +1282,8 @@ int kvm_arch_vcpu_ioctl_run(struct kvm_vcpu *vcpu)
 		ret = kvm_handle_mmio_return(vcpu);
 		if (ret <= 0)
 			return ret;
+	} else {
+		vcpu->arch.mmio_wb.pending = false;
 	}
 
 	vcpu_load(vcpu);

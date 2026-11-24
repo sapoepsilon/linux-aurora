@@ -225,6 +225,7 @@ void kvm_reset_vcpu(struct kvm_vcpu *vcpu)
 	vcpu->arch.ctxt.spsr_irq = 0;
 	vcpu->arch.ctxt.spsr_fiq = 0;
 	vcpu_gp_regs(vcpu)->pstate = pstate;
+	vcpu->arch.mmio_wb.pending = false;
 
 	/* Reset system registers */
 	kvm_reset_sys_regs(vcpu);

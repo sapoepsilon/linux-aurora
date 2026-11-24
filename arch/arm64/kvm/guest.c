@@ -774,6 +774,7 @@ static void commit_pending_events(struct kvm_vcpu *vcpu)
 	 * the exception entry.
 	 */
 	vcpu->mmio_needed = false;
+	vcpu->arch.mmio_wb.pending = false;
 	kvm_call_hyp(__kvm_adjust_pc, vcpu);
 }
 

@@ -115,8 +115,10 @@ int kvm_handle_mmio_return(struct kvm_vcpu *vcpu)
 	 * Detect if the MMIO return was already handled or if userspace aborted
 	 * the MMIO access.
 	 */
-	if (unlikely(!vcpu->mmio_needed || kvm_pending_external_abort(vcpu)))
+	if (unlikely(!vcpu->mmio_needed || kvm_pending_external_abort(vcpu))) {
+		vcpu->arch.mmio_wb.pending = false;
 		return 1;
+	}
 
 	vcpu->mmio_needed = 0;
 
@@ -142,6 +144,11 @@ int kvm_handle_mmio_return(struct kvm_vcpu *vcpu)
 		vcpu_set_reg(vcpu, kvm_vcpu_dabt_get_rd(vcpu), data);
 	}
 
+	if (vcpu->arch.mmio_wb.pending) {
+		vcpu->arch.mmio_wb.pending = false;
+		vcpu_set_reg(vcpu, vcpu->arch.mmio_wb.rn, vcpu->arch.mmio_wb.val);
+	}
+
 	/*
 	 * The MMIO instruction is emulated and should not be re-executed
 	 * in the guest.
@@ -154,13 +161,14 @@ int kvm_handle_mmio_return(struct kvm_vcpu *vcpu)
 static bool emulate_nisv_ldst = true;
 module_param(emulate_nisv_ldst, bool, 0644);
 MODULE_PARM_DESC(emulate_nisv_ldst,
-		 "Decode and emulate MMIO load/store-immediate aborts that lack a valid syndrome");
+		 "Decode and emulate MMIO load/store-immediate aborts without a valid syndrome (skipped when KVM_CAP_ARM_NISV_TO_USER is enabled)");
 
 /*
  * Some guests (macOS on the VMApple platform) access MMIO with writeback
  * forms such as "str w9, [x8, #128]!", for which the CPU reports no
  * instruction syndrome. Decode the single-register load/store (immediate)
- * class from guest memory, apply the base writeback, and synthesise a valid
+ * class from guest memory, record any base-register writeback to be applied
+ * upon MMIO completion in kvm_handle_mmio_return(), and synthesise a valid
  * ISS so the regular MMIO path (in-kernel devices or userspace) handles the
  * access. Anything else keeps the previous behaviour.
  */
@@ -168,15 +176,18 @@ static bool kvm_emulate_nisv_ldst(struct kvm_vcpu *vcpu)
 {
 	struct kvm_vcpu_fault_info *fault = &vcpu->arch.fault;
 	u64 par = fault->insn_par, ipa, base, addr, iss;
-	unsigned int size, opc, rt, rn, idx;
-	bool store, sign, sf, wb = false;
+	unsigned int size, opc, rt, rn, idx = 0;
+	bool store, sign, sf, wb = false, post_idx = false;
 	s64 off;
 	__le32 raw;
 	u32 insn;
 
-	if (!emulate_nisv_ldst || (par & SYS_PAR_EL1_F) || vcpu_mode_is_32bit(vcpu))
+	if (!emulate_nisv_ldst || (par & SYS_PAR_EL1_F) ||
+	    vcpu_mode_is_32bit(vcpu) ||
+	    (fault->esr_el2 & (ESR_ELx_CM | ESR_ELx_FnV)))
 		return false;
-	ipa = (par & GENMASK_ULL(51, 12)) | (*vcpu_pc(vcpu) & GENMASK_ULL(11, 0));
+
+	ipa = (par & SYS_PAR_EL1_PA) | (*vcpu_pc(vcpu) & GENMASK_ULL(11, 0));
 	if (kvm_read_guest(vcpu->kvm, ipa, &raw, sizeof(raw)))
 		return false;
 	insn = le32_to_cpu(raw);
@@ -194,6 +205,7 @@ static bool kvm_emulate_nisv_ldst(struct kvm_vcpu *vcpu)
 			return false;
 		off = sign_extend64((insn >> 12) & 0x1ff, 8);
 		wb = idx != 0;		/* 1: post-index, 3: pre-index */
+		post_idx = idx == 1;
 	} else {
 		return false;
 	}
@@ -202,11 +214,20 @@ static bool kvm_emulate_nisv_ldst(struct kvm_vcpu *vcpu)
 	sign = opc >= 2;
 	if (sign && (size == 3 || (size == 2 && opc == 3)))
 		return false;		/* PRFM or unallocated */
-	if (rn == 31 || (wb && !store && rt == rn))
+	if (store != !!kvm_vcpu_dabt_iswrite(vcpu))
+		return false;
+
+	/*
+	 * Base register SP (Rn == 31) is not accessed via vcpu_get_reg().
+	 * For writeback forms, Rt == Rn (with Rn != 31) is CONSTRAINED
+	 * UNPREDICTABLE for both loads (WBOVERLAPLD) and stores (WBOVERLAPST)
+	 * per ARMv8-A C6.2; reject both rather than inventing semantics.
+	 */
+	if (rn == 31 || (wb && rt == rn))
 		return false;
 
 	base = vcpu_get_reg(vcpu, rn);
-	addr = (wb && ((insn >> 10) & 3) == 1) ? base : base + off;
+	addr = post_idx ? base : base + off;
 	if (addr != kvm_vcpu_get_hfar(vcpu))
 		return false;
 
@@ -221,8 +242,11 @@ static bool kvm_emulate_nisv_ldst(struct kvm_vcpu *vcpu)
 		iss |= ESR_ELx_WNR;
 	fault->esr_el2 = (fault->esr_el2 & ~(ESR_ELx_ISS_MASK & ~ESR_ELx_FSC)) | iss;
 
-	if (wb)
-		vcpu_set_reg(vcpu, rn, base + off);
+	if (wb) {
+		vcpu->arch.mmio_wb.rn = rn;
+		vcpu->arch.mmio_wb.val = base + off;
+		vcpu->arch.mmio_wb.pending = true;
+	}
 	return true;
 }
 
@@ -237,7 +261,16 @@ int io_mem_abort(struct kvm_vcpu *vcpu, phys_addr_t fault_ipa)
 	u8 data_buf[8];
 	u64 esr;
 
-	if (!kvm_vcpu_dabt_isvalid(vcpu) && !vcpu_is_protected(vcpu))
+	vcpu->arch.mmio_wb.pending = false;
+
+	/*
+	 * If userspace explicitly requested NISV aborts via
+	 * KVM_CAP_ARM_NISV_TO_USER, preserve userspace precedence and skip
+	 * in-kernel load/store-immediate decoding.
+	 */
+	if (!kvm_vcpu_dabt_isvalid(vcpu) && !vcpu_is_protected(vcpu) &&
+	    !test_bit(KVM_ARCH_FLAG_RETURN_NISV_IO_ABORT_TO_USER,
+		      &vcpu->kvm->arch.flags))
 		kvm_emulate_nisv_ldst(vcpu);
 
 	esr = kvm_vcpu_get_esr(vcpu);
