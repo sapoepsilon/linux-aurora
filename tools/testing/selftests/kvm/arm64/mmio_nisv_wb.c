@@ -36,15 +36,16 @@
 #define MMIO_STRIDE_OFF		0x10ULL
 #define MMIO_NEG_OFF		0x8ULL
 
+/* Keep MMIO operands in callee-saved registers across GUEST_SYNC_ARGS(). */
 static u64 expected_abort_pc;
-static u64 expected_abort_x8;
+static u64 expected_abort_x19;
 
 static void expect_sea_wb_handler(struct ex_regs *regs)
 {
 	u64 esr = read_sysreg(esr_el1);
 
 	GUEST_ASSERT_EQ(regs->pc, expected_abort_pc);
-	GUEST_ASSERT_EQ(regs->regs[8], expected_abort_x8);
+	GUEST_ASSERT_EQ(regs->regs[19], expected_abort_x19);
 	GUEST_ASSERT_EQ(ESR_ELx_EC(esr), ESR_ELx_EC_DABT_CUR);
 	GUEST_ASSERT_EQ(esr & ESR_ELx_FSC_TYPE, ESR_ELx_FSC_EXTABT);
 
@@ -90,8 +91,9 @@ static void expect_ucall_sync2(struct kvm_vcpu *vcpu, u64 arg0, u64 arg1)
 	vcpu_run(vcpu);
 	switch (get_ucall(vcpu, &uc)) {
 	case UCALL_SYNC:
-		TEST_ASSERT_EQ(uc.args[1], arg0);
-		TEST_ASSERT_EQ(uc.args[2], arg1);
+		TEST_ASSERT_EQ(uc.args[1], 0);
+		TEST_ASSERT_EQ(uc.args[2], arg0);
+		TEST_ASSERT_EQ(uc.args[3], arg1);
 		break;
 	case UCALL_ABORT:
 		REPORT_GUEST_ASSERT(uc);
@@ -121,16 +123,16 @@ static void expect_ucall_done(struct kvm_vcpu *vcpu)
 
 static void guest_pre_index_user(void)
 {
-	register u64 base asm("x8") = MMIO_ADDR;
-	register u64 val asm("x9") = 0x1122334455667788ULL;
+	register u64 base asm("x19") = MMIO_ADDR;
+	register u64 val asm("x20") = 0x1122334455667788ULL;
 
-	/* Pre-index store (+16): writes to MMIO_ADDR + 16, x8 -> MMIO_ADDR + 16 */
-	asm volatile("str x9, [x8, #16]!"
+	/* Pre-index store (+16): writes to MMIO_ADDR + 16, x19 -> MMIO_ADDR + 16 */
+	asm volatile("str x20, [x19, #16]!"
 		     : "+r"(base) : "r"(val) : "memory");
 	GUEST_SYNC_ARGS(0, base, val, 0, 0);
 
-	/* Pre-index load (-8): reads MMIO_ADDR + 8, x8 -> MMIO_ADDR + 8 */
-	asm volatile("ldr x9, [x8, #-8]!"
+	/* Pre-index load (-8): reads MMIO_ADDR + 8, x19 -> MMIO_ADDR + 8 */
+	asm volatile("ldr x20, [x19, #-8]!"
 		     : "+r"(base), "=r"(val) :: "memory");
 	GUEST_SYNC_ARGS(0, base, val, 0, 0);
 
@@ -154,7 +156,7 @@ static void test_pre_index_userspace(void)
 	memcpy(&stored, run->mmio.data, 8);
 	TEST_ASSERT_EQ(stored, 0x1122334455667788ULL);
 	/* Base register MUST NOT be updated before completion */
-	TEST_ASSERT_EQ(vcpu_get_x(vcpu, 8), MMIO_ADDR);
+	TEST_ASSERT_EQ(vcpu_get_x(vcpu, 19), MMIO_ADDR);
 
 	expect_ucall_sync2(vcpu, MMIO_ADDR + MMIO_STRIDE_OFF,
 			   0x1122334455667788ULL);
@@ -166,7 +168,7 @@ static void test_pre_index_userspace(void)
 	TEST_ASSERT_EQ(run->mmio.phys_addr, MMIO_ADDR + MMIO_NEG_OFF);
 	TEST_ASSERT_EQ(run->mmio.len, 8);
 	/* Base register MUST NOT be updated before completion */
-	TEST_ASSERT_EQ(vcpu_get_x(vcpu, 8), MMIO_ADDR + MMIO_STRIDE_OFF);
+	TEST_ASSERT_EQ(vcpu_get_x(vcpu, 19), MMIO_ADDR + MMIO_STRIDE_OFF);
 	memcpy(run->mmio.data, &ret_val, 8);
 
 	expect_ucall_sync2(vcpu, MMIO_ADDR + MMIO_NEG_OFF, ret_val);
@@ -180,16 +182,16 @@ static void test_pre_index_userspace(void)
 
 static void guest_post_index_user(void)
 {
-	register u64 base asm("x8") = MMIO_ADDR;
-	register u64 val asm("x9") = 0xaabbccdd11223344ULL;
+	register u64 base asm("x19") = MMIO_ADDR;
+	register u64 val asm("x20") = 0xaabbccdd11223344ULL;
 
-	/* Post-index store (+16): writes MMIO_ADDR, x8 -> MMIO_ADDR + 16 */
-	asm volatile("str x9, [x8], #16"
+	/* Post-index store (+16): writes MMIO_ADDR, x19 -> MMIO_ADDR + 16 */
+	asm volatile("str x20, [x19], #16"
 		     : "+r"(base) : "r"(val) : "memory");
 	GUEST_SYNC_ARGS(0, base, val, 0, 0);
 
-	/* Post-index load (-8): reads MMIO_ADDR + 16, x8 -> MMIO_ADDR + 8 */
-	asm volatile("ldr x9, [x8], #-8"
+	/* Post-index load (-8): reads MMIO_ADDR + 16, x19 -> MMIO_ADDR + 8 */
+	asm volatile("ldr x20, [x19], #-8"
 		     : "+r"(base), "=r"(val) :: "memory");
 	GUEST_SYNC_ARGS(0, base, val, 0, 0);
 
@@ -212,7 +214,7 @@ static void test_post_index_userspace(void)
 	TEST_ASSERT_EQ(run->mmio.len, 8);
 	memcpy(&stored, run->mmio.data, 8);
 	TEST_ASSERT_EQ(stored, 0xaabbccdd11223344ULL);
-	TEST_ASSERT_EQ(vcpu_get_x(vcpu, 8), MMIO_ADDR);
+	TEST_ASSERT_EQ(vcpu_get_x(vcpu, 19), MMIO_ADDR);
 
 	expect_ucall_sync2(vcpu, MMIO_ADDR + MMIO_STRIDE_OFF,
 			   0xaabbccdd11223344ULL);
@@ -223,7 +225,7 @@ static void test_post_index_userspace(void)
 	TEST_ASSERT(!run->mmio.is_write, "Expected MMIO read");
 	TEST_ASSERT_EQ(run->mmio.phys_addr, MMIO_ADDR + MMIO_STRIDE_OFF);
 	TEST_ASSERT_EQ(run->mmio.len, 8);
-	TEST_ASSERT_EQ(vcpu_get_x(vcpu, 8), MMIO_ADDR + MMIO_STRIDE_OFF);
+	TEST_ASSERT_EQ(vcpu_get_x(vcpu, 19), MMIO_ADDR + MMIO_STRIDE_OFF);
 	memcpy(run->mmio.data, &ret_val, 8);
 
 	expect_ucall_sync2(vcpu, MMIO_ADDR + MMIO_NEG_OFF, ret_val);
@@ -237,17 +239,17 @@ static void test_post_index_userspace(void)
 
 static void guest_inkernel_vgic(void)
 {
-	register u64 base asm("x8") = GICD_BASE_GPA;
-	register u32 typer1 asm("w9");
-	register u32 typer2 asm("w10");
+	register u64 base asm("x19") = GICD_BASE_GPA;
+	register u32 typer1 asm("w20");
+	register u32 typer2 asm("w21");
 
-	/* Pre-index: reads GICD_BASE_GPA + GICD_TYPER (0x4), x8 -> +4 */
-	asm volatile("ldr w9, [x8, #4]!"
+	/* Pre-index: reads GICD_BASE_GPA + GICD_TYPER (0x4), x19 -> +4 */
+	asm volatile("ldr w20, [x19, #4]!"
 		     : "+r"(base), "=r"(typer1) :: "memory");
 	GUEST_SYNC_ARGS(0, base, typer1, 0, 0);
 
-	/* Post-index: reads GICD_BASE_GPA + GICD_TYPER (0x4), x8 -> +8 */
-	asm volatile("ldr w10, [x8], #4"
+	/* Post-index: reads GICD_BASE_GPA + GICD_TYPER (0x4), x19 -> +8 */
+	asm volatile("ldr w21, [x19], #4"
 		     : "+r"(base), "=r"(typer2) :: "memory");
 	GUEST_SYNC_ARGS(0, base, typer2, 0, 0);
 
@@ -276,13 +278,15 @@ static void test_inkernel_vgic_writeback(void)
 	/* Both reads must be handled in-kernel (no KVM_EXIT_MMIO) */
 	vcpu_run(vcpu);
 	TEST_ASSERT_EQ(get_ucall(vcpu, &uc), UCALL_SYNC);
-	TEST_ASSERT_EQ(uc.args[1], GICD_BASE_GPA + GICD_TYPER);
-	typer1 = uc.args[2];
+	TEST_ASSERT_EQ(uc.args[1], 0);
+	TEST_ASSERT_EQ(uc.args[2], GICD_BASE_GPA + GICD_TYPER);
+	typer1 = uc.args[3];
 
 	vcpu_run(vcpu);
 	TEST_ASSERT_EQ(get_ucall(vcpu, &uc), UCALL_SYNC);
-	TEST_ASSERT_EQ(uc.args[1], GICD_BASE_GPA + GICD_IIDR);
-	typer2 = uc.args[2];
+	TEST_ASSERT_EQ(uc.args[1], 0);
+	TEST_ASSERT_EQ(uc.args[2], GICD_BASE_GPA + GICD_IIDR);
+	typer2 = uc.args[3];
 	TEST_ASSERT_EQ(typer1, typer2);
 
 	expect_ucall_done(vcpu);
@@ -298,28 +302,28 @@ extern char abort_pre_insn, abort_post_insn;
 
 static void guest_abort_pre(void)
 {
-	register u64 base asm("x8") = MMIO_ADDR;
-	register u64 val asm("x9") = 0x55aa55aaULL;
+	register u64 base asm("x19") = MMIO_ADDR;
+	register u64 val asm("x20") = 0x55aa55aaULL;
 
 	WRITE_ONCE(expected_abort_pc, (u64)&abort_pre_insn);
-	WRITE_ONCE(expected_abort_x8, MMIO_ADDR);
+	WRITE_ONCE(expected_abort_x19, MMIO_ADDR);
 
 	asm volatile("abort_pre_insn:\n\t"
-		     "str x9, [x8, #16]!\n\t"
+		     "str x20, [x19, #16]!\n\t"
 		     : "+r"(base) : "r"(val) : "memory");
 	GUEST_FAIL("Aborted pre-index store must not retire");
 }
 
 static void guest_abort_post(void)
 {
-	register u64 base asm("x8") = MMIO_ADDR;
-	register u64 val asm("x9");
+	register u64 base asm("x19") = MMIO_ADDR;
+	register u64 val asm("x20");
 
 	WRITE_ONCE(expected_abort_pc, (u64)&abort_post_insn);
-	WRITE_ONCE(expected_abort_x8, MMIO_ADDR);
+	WRITE_ONCE(expected_abort_x19, MMIO_ADDR);
 
 	asm volatile("abort_post_insn:\n\t"
-		     "ldr x9, [x8], #16\n\t"
+		     "ldr x20, [x19], #16\n\t"
 		     : "+r"(base), "=r"(val) :: "memory");
 	GUEST_FAIL("Aborted post-index load must not retire");
 }
@@ -336,7 +340,7 @@ static void run_abort_case(void *guest_fn, const char *name, u64 expect_ipa,
 	TEST_ASSERT_KVM_EXIT_REASON(vcpu, KVM_EXIT_MMIO);
 	TEST_ASSERT_EQ(run->mmio.phys_addr, expect_ipa);
 	TEST_ASSERT_EQ(!!run->mmio.is_write, expect_write);
-	TEST_ASSERT_EQ(vcpu_get_x(vcpu, 8), MMIO_ADDR);
+	TEST_ASSERT_EQ(vcpu_get_x(vcpu, 19), MMIO_ADDR);
 
 	vcpu_inject_sea(vcpu);
 	expect_ucall_done(vcpu);
@@ -349,14 +353,14 @@ static void run_abort_case(void *guest_fn, const char *name, u64 expect_ipa,
 
 static void guest_replay_wb(void)
 {
-	register u64 base asm("x8") = MMIO_ADDR;
-	register u64 val asm("x9") = 0xcafe0001ULL;
+	register u64 base asm("x19") = MMIO_ADDR;
+	register u64 val asm("x20") = 0xcafe0001ULL;
 
-	asm volatile("str x9, [x8, #16]!"
+	asm volatile("str x20, [x19, #16]!"
 		     : "+r"(base) : "r"(val) : "memory");
 	GUEST_SYNC_ARGS(0, base, val, 0, 0);
 
-	asm volatile("ldr x9, [x8], #16"
+	asm volatile("ldr x20, [x19], #16"
 		     : "+r"(base), "=r"(val) :: "memory");
 	GUEST_SYNC_ARGS(0, base, val, 0, 0);
 
@@ -375,28 +379,28 @@ static void test_replay_single_writeback(void)
 	vcpu_run(vcpu);
 	TEST_ASSERT_KVM_EXIT_REASON(vcpu, KVM_EXIT_MMIO);
 	TEST_ASSERT_EQ(run->mmio.phys_addr, MMIO_ADDR + 16);
-	TEST_ASSERT_EQ(vcpu_get_x(vcpu, 8), MMIO_ADDR);
+	TEST_ASSERT_EQ(vcpu_get_x(vcpu, 19), MMIO_ADDR);
 
 	run->exit_reason = KVM_EXIT_UNKNOWN;
 	vcpu_run(vcpu);
 	TEST_ASSERT_KVM_EXIT_REASON(vcpu, KVM_EXIT_MMIO);
 	TEST_ASSERT_EQ(run->mmio.phys_addr, MMIO_ADDR + 16);
-	TEST_ASSERT_EQ(vcpu_get_x(vcpu, 8), MMIO_ADDR);
+	TEST_ASSERT_EQ(vcpu_get_x(vcpu, 19), MMIO_ADDR);
 
-	/* Complete store once; x8 must be MMIO_ADDR + 16 (not +32) */
+	/* Complete store once; x19 must be MMIO_ADDR + 16 (not +32) */
 	expect_ucall_sync2(vcpu, MMIO_ADDR + 16, 0xcafe0001ULL);
 
 	/* First exit for post-index load -> replay without completing */
 	vcpu_run(vcpu);
 	TEST_ASSERT_KVM_EXIT_REASON(vcpu, KVM_EXIT_MMIO);
 	TEST_ASSERT_EQ(run->mmio.phys_addr, MMIO_ADDR + 16);
-	TEST_ASSERT_EQ(vcpu_get_x(vcpu, 8), MMIO_ADDR + 16);
+	TEST_ASSERT_EQ(vcpu_get_x(vcpu, 19), MMIO_ADDR + 16);
 
 	run->exit_reason = KVM_EXIT_UNKNOWN;
 	vcpu_run(vcpu);
 	TEST_ASSERT_KVM_EXIT_REASON(vcpu, KVM_EXIT_MMIO);
 	TEST_ASSERT_EQ(run->mmio.phys_addr, MMIO_ADDR + 16);
-	TEST_ASSERT_EQ(vcpu_get_x(vcpu, 8), MMIO_ADDR + 16);
+	TEST_ASSERT_EQ(vcpu_get_x(vcpu, 19), MMIO_ADDR + 16);
 
 	/* Complete load with immediate_exit=1 first to test idempotent return */
 	memcpy(run->mmio.data, &load_val, 8);
@@ -405,7 +409,7 @@ static void test_replay_single_writeback(void)
 		    "Expected EINTR with immediate_exit");
 	run->immediate_exit = 0;
 
-	/* x8 must be MMIO_ADDR + 32 (not +48) */
+	/* x19 must be MMIO_ADDR + 32 (not +48) */
 	expect_ucall_sync2(vcpu, MMIO_ADDR + 32, load_val);
 	expect_ucall_done(vcpu);
 
@@ -417,38 +421,38 @@ static void test_replay_single_writeback(void)
 
 static void guest_rt_eq_rn_str_pre(void)
 {
-	register u64 base asm("x8") = MMIO_ADDR;
+	register u64 base asm("x19") = MMIO_ADDR;
 
-	/* .inst 0xf8008d08 = str x8, [x8, #8]! */
-	asm volatile(".inst 0xf8008d08" : "+r"(base) :: "memory");
-	GUEST_FAIL("CONSTRAINED UNPREDICTABLE str x8, [x8, #8]! must not retire");
+	/* .inst 0xf8008e73 = str x19, [x19, #8]! */
+	asm volatile(".inst 0xf8008e73" : "+r"(base) :: "memory");
+	GUEST_FAIL("CONSTRAINED UNPREDICTABLE str x19, [x19, #8]! must not retire");
 }
 
 static void guest_rt_eq_rn_str_post(void)
 {
-	register u64 base asm("x8") = MMIO_ADDR;
+	register u64 base asm("x19") = MMIO_ADDR;
 
-	/* .inst 0xf8008508 = str x8, [x8], #8 */
-	asm volatile(".inst 0xf8008508" : "+r"(base) :: "memory");
-	GUEST_FAIL("CONSTRAINED UNPREDICTABLE str x8, [x8], #8 must not retire");
+	/* .inst 0xf8008673 = str x19, [x19], #8 */
+	asm volatile(".inst 0xf8008673" : "+r"(base) :: "memory");
+	GUEST_FAIL("CONSTRAINED UNPREDICTABLE str x19, [x19], #8 must not retire");
 }
 
 static void guest_rt_eq_rn_ldr_pre(void)
 {
-	register u64 base asm("x8") = MMIO_ADDR;
+	register u64 base asm("x19") = MMIO_ADDR;
 
-	/* .inst 0xf8408d08 = ldr x8, [x8, #8]! */
-	asm volatile(".inst 0xf8408d08" : "+r"(base) :: "memory");
-	GUEST_FAIL("CONSTRAINED UNPREDICTABLE ldr x8, [x8, #8]! must not retire");
+	/* .inst 0xf8408e73 = ldr x19, [x19, #8]! */
+	asm volatile(".inst 0xf8408e73" : "+r"(base) :: "memory");
+	GUEST_FAIL("CONSTRAINED UNPREDICTABLE ldr x19, [x19, #8]! must not retire");
 }
 
 static void guest_rt_eq_rn_ldr_post(void)
 {
-	register u64 base asm("x8") = MMIO_ADDR;
+	register u64 base asm("x19") = MMIO_ADDR;
 
-	/* .inst 0xf8408508 = ldr x8, [x8], #8 */
-	asm volatile(".inst 0xf8408508" : "+r"(base) :: "memory");
-	GUEST_FAIL("CONSTRAINED UNPREDICTABLE ldr x8, [x8], #8 must not retire");
+	/* .inst 0xf8408673 = ldr x19, [x19], #8 */
+	asm volatile(".inst 0xf8408673" : "+r"(base) :: "memory");
+	GUEST_FAIL("CONSTRAINED UNPREDICTABLE ldr x19, [x19], #8 must not retire");
 }
 
 static void run_rt_eq_rn_case(void *guest_fn, const char *name)
@@ -459,7 +463,7 @@ static void run_rt_eq_rn_case(void *guest_fn, const char *name)
 
 	TEST_ASSERT(_vcpu_run(vcpu) == -1 && errno == ENOSYS,
 		    "%s: expected -ENOSYS", name);
-	TEST_ASSERT_EQ(vcpu_get_x(vcpu, 8), MMIO_ADDR);
+	TEST_ASSERT_EQ(vcpu_get_x(vcpu, 19), MMIO_ADDR);
 
 	kvm_vm_free(vm);
 	ksft_test_result_pass("%s\n", name);
@@ -471,28 +475,28 @@ extern char nisv_user_pre_insn, nisv_vgic_post_insn;
 
 static void guest_nisv_precedence_user(void)
 {
-	register u64 base asm("x8") = MMIO_ADDR;
-	register u64 val asm("x9") = 0x42;
+	register u64 base asm("x19") = MMIO_ADDR;
+	register u64 val asm("x20") = 0x42;
 
 	WRITE_ONCE(expected_abort_pc, (u64)&nisv_user_pre_insn);
-	WRITE_ONCE(expected_abort_x8, MMIO_ADDR);
+	WRITE_ONCE(expected_abort_x19, MMIO_ADDR);
 
 	asm volatile("nisv_user_pre_insn:\n\t"
-		     "str x9, [x8, #16]!\n\t"
+		     "str x20, [x19, #16]!\n\t"
 		     : "+r"(base) : "r"(val) : "memory");
 	GUEST_FAIL("Expected KVM_EXIT_ARM_NISV, not silent emulation");
 }
 
 static void guest_nisv_precedence_vgic(void)
 {
-	register u64 base asm("x8") = GICD_BASE_GPA + GICD_TYPER;
-	register u32 val asm("w9");
+	register u64 base asm("x19") = GICD_BASE_GPA + GICD_TYPER;
+	register u32 val asm("w20");
 
 	WRITE_ONCE(expected_abort_pc, (u64)&nisv_vgic_post_insn);
-	WRITE_ONCE(expected_abort_x8, GICD_BASE_GPA + GICD_TYPER);
+	WRITE_ONCE(expected_abort_x19, GICD_BASE_GPA + GICD_TYPER);
 
 	asm volatile("nisv_vgic_post_insn:\n\t"
-		     "ldr w9, [x8], #4\n\t"
+		     "ldr w20, [x19], #4\n\t"
 		     : "+r"(base), "=r"(val) :: "memory");
 	GUEST_FAIL("Expected KVM_EXIT_ARM_NISV on vGIC, not in-kernel emulation");
 }
@@ -513,7 +517,7 @@ static void test_nisv_to_user_precedence(void)
 	vcpu_run(vcpu);
 	TEST_ASSERT_KVM_EXIT_REASON(vcpu, KVM_EXIT_ARM_NISV);
 	TEST_ASSERT_EQ(run->arm_nisv.fault_ipa, MMIO_ADDR + 16);
-	TEST_ASSERT_EQ(vcpu_get_x(vcpu, 8), MMIO_ADDR);
+	TEST_ASSERT_EQ(vcpu_get_x(vcpu, 19), MMIO_ADDR);
 
 	vcpu_inject_sea(vcpu);
 	expect_ucall_done(vcpu);
@@ -536,7 +540,7 @@ static void test_nisv_to_user_precedence(void)
 	vcpu_run(vcpu);
 	TEST_ASSERT_KVM_EXIT_REASON(vcpu, KVM_EXIT_ARM_NISV);
 	TEST_ASSERT_EQ(run->arm_nisv.fault_ipa, GICD_BASE_GPA + GICD_TYPER);
-	TEST_ASSERT_EQ(vcpu_get_x(vcpu, 8), GICD_BASE_GPA + GICD_TYPER);
+	TEST_ASSERT_EQ(vcpu_get_x(vcpu, 19), GICD_BASE_GPA + GICD_TYPER);
 
 	vcpu_inject_sea(vcpu);
 	expect_ucall_done(vcpu);
